@@ -46,7 +46,8 @@ curl -X POST http://localhost:8000/api/v1/run-task \
     "llm_provider": "browser_use",
     "llm_model": "bu-latest",
     "max_agent_steps": 40,
-    "use_cloud": false
+    "use_cloud": false,
+    "downloads_path": "/Users/zephyr/wealth/browser-use/downloads"
   }'
 ```
 
@@ -70,6 +71,8 @@ Get details/output:
 ```bash
 curl http://localhost:8000/api/v1/task/<task_id>
 ```
+
+`/api/v1/task/{task_id}` includes `downloaded_files` so you can verify what was actually saved.
 
 Block until complete:
 

@@ -35,6 +35,8 @@ class RunTaskRequest(BaseModel):
 	use_cloud: bool = False
 	headless: bool | None = None
 	keep_alive: bool = False
+	accept_downloads: bool = True
+	downloads_path: str | None = Field(default=str(Path.cwd() / 'downloads'))
 	user_data_dir: str | None = None
 	executable_path: str | None = None
 	allowed_domains: list[str] | None = None
@@ -75,6 +77,7 @@ class TaskDetailsResponse(BaseModel):
 	output: str | None = None
 	error: str | None = None
 	steps: list[dict[str, Any]] = Field(default_factory=list)
+	downloaded_files: list[str] = Field(default_factory=list)
 	live_url: str | None = None
 	public_share_url: str | None = None
 
@@ -143,8 +146,17 @@ class JobStore:
 			job.started_at = datetime.now(UTC)
 
 	async def _set_result(self, job_id: str, history):
+		session_downloads: list[str] = []
+		if isinstance(history, dict) and 'history' in history:
+			session_downloads_raw = history.get('downloaded_files')
+			if isinstance(session_downloads_raw, list):
+				session_downloads = [str(p) for p in session_downloads_raw]
+			history = history['history']
+
 		errors_raw = _safe_call(history, 'errors')
 		errors = errors_raw if isinstance(errors_raw, list) else []
+		attachments = _collect_attachments(history)
+		downloaded_files = list(dict.fromkeys([*session_downloads, *attachments]))
 		payload = {
 			'is_done': _safe_call(history, 'is_done'),
 			'is_successful': _safe_call(history, 'is_successful'),
@@ -154,6 +166,7 @@ class JobStore:
 			'errors': [str(e) if e is not None else None for e in errors],
 			'number_of_steps': _safe_call(history, 'number_of_steps'),
 			'total_duration_seconds': _safe_call(history, 'total_duration_seconds'),
+			'downloaded_files': downloaded_files,
 		}
 		async with self._lock:
 			job = self._jobs[job_id]
@@ -207,6 +220,20 @@ def _safe_call(history, method_name: str):
 	return method
 
 
+def _collect_attachments(history) -> list[str]:
+	results = _safe_call(history, 'action_results')
+	if not isinstance(results, list):
+		return []
+
+	files: list[str] = []
+	for action_result in results:
+		attachments = getattr(action_result, 'attachments', None)
+		if isinstance(attachments, list):
+			for path in attachments:
+				files.append(str(path))
+	return files
+
+
 def _build_llm(request: RunTaskRequest):
 	if request.llm_provider == 'browser_use':
 		return ChatBrowserUse(model=request.llm_model)
@@ -220,10 +247,14 @@ def _build_llm(request: RunTaskRequest):
 
 
 async def _run_generic_task(request: RunTaskRequest):
+	if request.downloads_path:
+		Path(request.downloads_path).mkdir(parents=True, exist_ok=True)
 	browser_profile = BrowserProfile(
 		keep_alive=request.keep_alive,
 		use_cloud=request.use_cloud,
 		headless=request.headless,
+		accept_downloads=request.accept_downloads,
+		downloads_path=request.downloads_path,
 		user_data_dir=request.user_data_dir,
 		executable_path=request.executable_path,
 		allowed_domains=request.allowed_domains,
@@ -231,7 +262,9 @@ async def _run_generic_task(request: RunTaskRequest):
 	)
 	llm = _build_llm(request)
 	agent = Agent(task=request.task, llm=llm, browser_profile=browser_profile, use_vision=request.use_vision)
-	return await agent.run(max_steps=request.max_agent_steps)
+	history = await agent.run(max_steps=request.max_agent_steps)
+	downloaded_files = agent.browser_session.downloaded_files if agent.browser_session else []
+	return {'history': history, 'downloaded_files': downloaded_files}
 
 
 def _to_cloud_status(status: JobStatus) -> CloudTaskStatus:
@@ -255,6 +288,7 @@ def _to_task_details(job: LegacyJobState) -> TaskDetailsResponse:
 		output=result.get('final_result'),
 		error=job.error,
 		steps=[],
+		downloaded_files=result.get('downloaded_files') or [],
 	)
 
 
