@@ -45,6 +45,7 @@ curl -X POST http://localhost:8000/api/v1/run-task \
     "task": "Go to example.com and summarize the page",
     "llm_provider": "browser_use",
     "llm_model": "bu-latest",
+    "session_id": "my-kumo-session",
     "max_agent_steps": 40,
     "use_cloud": false,
     "downloads_path": "/Users/zephyr/wealth/browser-use/downloads"
@@ -113,7 +114,8 @@ curl -X POST http://localhost:8000/api/v1/run-kumo-task \
   -d '{
     "saved_search_url": "https://app.withkumo.com/search/saved/your-id",
     "email": "you@example.com",
-    "password": "your-password"
+    "password": "your-password",
+    "session_id": "kumo-main"
   }'
 ```
 
@@ -127,12 +129,19 @@ curl -X POST http://localhost:8000/api/v1/run-kumo-task \
 `BrowserProfile`:
 
 - Created internally from request fields.
+- If you pass `session_id`, API maps it to a stable profile directory:
+  - `~/.config/browseruse/browser-use-user-data-dir-local-api-<session_id>` for generic tasks
+  - `~/.config/browseruse/browser-use-user-data-dir-kumo-<session_id>` for Kumo tasks
+- This keeps extension installs/cookies/auth across API calls and server restarts.
 - Supported profile-related fields on `run-task`:
   - `use_cloud`
   - `headless`
   - `keep_alive`
+  - `session_id`
   - `user_data_dir`
   - `executable_path`
+  - `downloads_path`
+  - `accept_downloads`
   - `allowed_domains`
   - `prohibited_domains`
 

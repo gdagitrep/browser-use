@@ -31,6 +31,7 @@ class RunTaskRequest(BaseModel):
 	task: str = Field(min_length=1)
 	llm_model: str = Field(default='bu-latest')
 	llm_provider: Literal['browser_use', 'openai', 'google', 'anthropic'] = 'browser_use'
+	session_id: str | None = None
 	max_agent_steps: int = Field(default=100, ge=1, le=500)
 	use_cloud: bool = False
 	headless: bool | None = None
@@ -50,10 +51,11 @@ class RunKumoTaskRequest(BaseModel):
 	saved_search_url: str = Field(min_length=1)
 	email: str = Field(min_length=1)
 	password: str = Field(min_length=1)
+	session_id: str | None = None
 	llm_model: str = Field(default='gpt-5-mini')
 	max_agent_steps: int = Field(default=100, ge=1, le=500)
 	downloads_path: str = Field(default=str(Path.cwd() / 'downloads'))
-	user_data_dir: str = Field(default='~/.config/browseruse/browser-use-user-data-dir-kumo')
+	user_data_dir: str | None = None
 	executable_path: str = Field(default='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
 	keep_alive: bool = False
 
@@ -234,6 +236,40 @@ def _collect_attachments(history) -> list[str]:
 	return files
 
 
+def _sanitize_session_id(session_id: str) -> str:
+	allowed = []
+	for ch in session_id:
+		if ch.isalnum() or ch in {'-', '_'}:
+			allowed.append(ch)
+	return ''.join(allowed) or 'default'
+
+
+def _resolve_user_data_dir(
+	*,
+	user_data_dir: str | None,
+	session_id: str | None,
+	namespace: str,
+	default_name: str | None = None,
+) -> str | None:
+	"""
+	Resolve a stable profile dir.
+
+	If `session_id` is provided, we force a persistent browser-use profile path whose
+	name includes `browser-use-user-data-dir-` so browser-use reuses it across runs.
+	"""
+	if user_data_dir:
+		return user_data_dir
+
+	if session_id:
+		safe_session = _sanitize_session_id(session_id)
+		return str(Path.home() / '.config' / 'browseruse' / f'browser-use-user-data-dir-{namespace}-{safe_session}')
+
+	if default_name:
+		return str(Path.home() / '.config' / 'browseruse' / default_name)
+
+	return None
+
+
 def _build_llm(request: RunTaskRequest):
 	if request.llm_provider == 'browser_use':
 		return ChatBrowserUse(model=request.llm_model)
@@ -249,13 +285,20 @@ def _build_llm(request: RunTaskRequest):
 async def _run_generic_task(request: RunTaskRequest):
 	if request.downloads_path:
 		Path(request.downloads_path).mkdir(parents=True, exist_ok=True)
+	resolved_user_data_dir = _resolve_user_data_dir(
+		user_data_dir=request.user_data_dir,
+		session_id=request.session_id,
+		namespace='local-api',
+	)
+	if resolved_user_data_dir:
+		Path(resolved_user_data_dir).expanduser().mkdir(parents=True, exist_ok=True)
 	browser_profile = BrowserProfile(
 		keep_alive=request.keep_alive,
 		use_cloud=request.use_cloud,
 		headless=request.headless,
 		accept_downloads=request.accept_downloads,
 		downloads_path=request.downloads_path,
-		user_data_dir=request.user_data_dir,
+		user_data_dir=resolved_user_data_dir,
 		executable_path=request.executable_path,
 		allowed_domains=request.allowed_domains,
 		prohibited_domains=request.prohibited_domains,
@@ -362,6 +405,12 @@ async def wait_task(task_id: str, timeout_seconds: float = 300.0, poll_interval:
 # Optional specialized Kumo endpoint
 @app.post('/api/v1/run-kumo-task')
 async def run_kumo_task(request: RunKumoTaskRequest) -> TaskCreatedResponse:
+	resolved_user_data_dir = _resolve_user_data_dir(
+		user_data_dir=request.user_data_dir,
+		session_id=request.session_id,
+		namespace='kumo',
+		default_name='browser-use-user-data-dir-kumo',
+	)
 	job = await store.create(
 		job_type='kumo',
 		request=request.model_dump(),
@@ -371,7 +420,7 @@ async def run_kumo_task(request: RunKumoTaskRequest) -> TaskCreatedResponse:
 			password=request.password,
 			model=request.llm_model,
 			downloads_path=request.downloads_path,
-			user_data_dir=request.user_data_dir,
+			user_data_dir=resolved_user_data_dir or '~/.config/browseruse/browser-use-user-data-dir-kumo',
 			executable_path=request.executable_path,
 			keep_alive=request.keep_alive,
 			max_steps=request.max_agent_steps,
@@ -389,6 +438,12 @@ async def create_agent_job_legacy(request: RunTaskRequest) -> LegacyJobAccepted:
 
 @app.post('/v1/jobs/kumo')
 async def create_kumo_job_legacy(request: RunKumoTaskRequest) -> LegacyJobAccepted:
+	resolved_user_data_dir = _resolve_user_data_dir(
+		user_data_dir=request.user_data_dir,
+		session_id=request.session_id,
+		namespace='kumo',
+		default_name='browser-use-user-data-dir-kumo',
+	)
 	job = await store.create(
 		job_type='kumo',
 		request=request.model_dump(),
@@ -398,7 +453,7 @@ async def create_kumo_job_legacy(request: RunKumoTaskRequest) -> LegacyJobAccept
 			password=request.password,
 			model=request.llm_model,
 			downloads_path=request.downloads_path,
-			user_data_dir=request.user_data_dir,
+			user_data_dir=resolved_user_data_dir or '~/.config/browseruse/browser-use-user-data-dir-kumo',
 			executable_path=request.executable_path,
 			keep_alive=request.keep_alive,
 			max_steps=request.max_agent_steps,

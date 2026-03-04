@@ -98,3 +98,12 @@ def test_legacy_endpoint_still_works(monkeypatch):
 		legacy_resp = client.get(f'/v1/jobs/{job_id}')
 		legacy_resp.raise_for_status()
 		assert legacy_resp.json()['job_id'] == job_id
+
+
+def test_session_id_resolves_stable_profile_dir():
+	path1 = local_api._resolve_user_data_dir(user_data_dir=None, session_id='team-a', namespace='local-api')
+	path2 = local_api._resolve_user_data_dir(user_data_dir=None, session_id='team-a', namespace='local-api')
+
+	assert path1 == path2
+	assert path1 is not None
+	assert 'browser-use-user-data-dir-local-api-team-a' in path1
