@@ -41,10 +41,11 @@ Create task:
 ```bash
 curl -X POST http://localhost:8000/api/v1/run-task \
   -H 'content-type: application/json' \
+  -H 'X-OpenAI-API-Key: sk-...' \
   -d '{
     "task": "Go to example.com and summarize the page",
-    "llm_provider": "browser_use",
-    "llm_model": "bu-latest",
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
     "session_id": "my-kumo-session",
     "max_agent_steps": 40,
     "use_cloud": false,
@@ -149,6 +150,13 @@ Model/provider fields:
 
 - `llm_provider`: `browser_use` (recommended), `openai`, `google`, `anthropic`
 - `llm_model`: model name for that provider
+
+API key headers:
+
+- Provider-specific headers are preferred: `X-Browser-Use-API-Key`, `X-OpenAI-API-Key`, `X-Google-API-Key`, `X-Anthropic-API-Key`
+- `X-API-Key` is accepted as a generic fallback for the selected `llm_provider`
+- `Authorization: Bearer <key>` is also accepted as a fallback
+- Header-provided keys are not stored in the task request payload
 
 ## 7. Recommended default
 

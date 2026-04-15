@@ -1,6 +1,7 @@
 import asyncio
 import re
-from pathlib import Path
+
+import anyio
 
 from browser_use import ActionResult, Agent, BrowserProfile, BrowserSession, ChatOpenAI, Tools
 
@@ -287,13 +288,14 @@ async def run_kumo_extraction(
 	password: str,
 	*,
 	model: str = 'gpt-5-mini',
+	api_key: str | None = None,
 	downloads_path: str,
 	user_data_dir: str,
 	executable_path: str,
 	keep_alive: bool = False,
 	max_steps: int = 100,
 ):
-	Path(downloads_path).mkdir(parents=True, exist_ok=True)
+	await anyio.Path(downloads_path).mkdir(parents=True, exist_ok=True)
 
 	browser_profile = BrowserProfile(
 		user_data_dir=user_data_dir,
@@ -302,7 +304,7 @@ async def run_kumo_extraction(
 		accept_downloads=True,
 		downloads_path=downloads_path,
 	)
-	llm = ChatOpenAI(model=model)
+	llm = ChatOpenAI(model=model, api_key=api_key)
 	task = build_agent_task(saved_search_url=saved_search_url, email=email, password=password)
 
 	agent = Agent(task=task, llm=llm, browser_profile=browser_profile, tools=tools)

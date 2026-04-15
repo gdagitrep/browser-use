@@ -2,10 +2,11 @@ import asyncio
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+import anyio
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from browser_use import Agent, BrowserProfile, ChatAnthropic, ChatBrowserUse, ChatGoogle, ChatOpenAI
@@ -58,6 +59,30 @@ class RunKumoTaskRequest(BaseModel):
 	user_data_dir: str | None = None
 	executable_path: str = Field(default='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
 	keep_alive: bool = False
+
+
+class LLMAPIKeyHeaders(BaseModel):
+	api_key: str | None = None
+	browser_use_api_key: str | None = None
+	openai_api_key: str | None = None
+	google_api_key: str | None = None
+	anthropic_api_key: str | None = None
+	authorization: str | None = None
+
+	def for_provider(self, provider: str) -> str | None:
+		provider_key = {
+			'browser_use': self.browser_use_api_key,
+			'openai': self.openai_api_key,
+			'google': self.google_api_key,
+			'anthropic': self.anthropic_api_key,
+		}.get(provider)
+		if provider_key:
+			return provider_key
+		if self.api_key:
+			return self.api_key
+		if self.authorization and self.authorization.lower().startswith('bearer '):
+			return self.authorization[7:].strip() or None
+		return None
 
 
 class TaskCreatedResponse(BaseModel):
@@ -270,28 +295,52 @@ def _resolve_user_data_dir(
 	return None
 
 
-def _build_llm(request: RunTaskRequest):
+def _read_api_key_headers(
+	x_api_key: str | None = Header(default=None, alias='X-API-Key'),
+	x_browser_use_api_key: str | None = Header(default=None, alias='X-Browser-Use-API-Key'),
+	x_openai_api_key: str | None = Header(default=None, alias='X-OpenAI-API-Key'),
+	x_google_api_key: str | None = Header(default=None, alias='X-Google-API-Key'),
+	x_anthropic_api_key: str | None = Header(default=None, alias='X-Anthropic-API-Key'),
+	authorization: str | None = Header(default=None, alias='Authorization'),
+) -> LLMAPIKeyHeaders:
+	return LLMAPIKeyHeaders(
+		api_key=x_api_key,
+		browser_use_api_key=x_browser_use_api_key,
+		openai_api_key=x_openai_api_key,
+		google_api_key=x_google_api_key,
+		anthropic_api_key=x_anthropic_api_key,
+		authorization=authorization,
+	)
+
+
+def _build_llm(request: RunTaskRequest, api_key_headers: LLMAPIKeyHeaders | None = None):
+	api_key = api_key_headers.for_provider(request.llm_provider) if api_key_headers else None
 	if request.llm_provider == 'browser_use':
-		return ChatBrowserUse(model=request.llm_model)
+		return ChatBrowserUse(model=request.llm_model, api_key=api_key)
 	if request.llm_provider == 'openai':
-		return ChatOpenAI(model=request.llm_model)
+		return ChatOpenAI(model=request.llm_model, api_key=api_key)
 	if request.llm_provider == 'google':
-		return ChatGoogle(model=request.llm_model)
+		return ChatGoogle(model=request.llm_model, api_key=api_key)
 	if request.llm_provider == 'anthropic':
-		return ChatAnthropic(model=request.llm_model)
+		return ChatAnthropic(model=request.llm_model, api_key=api_key)
 	raise ValueError(f'Unsupported llm_provider: {request.llm_provider}')
 
 
-async def _run_generic_task(request: RunTaskRequest):
+async def _mkdir_expanded(path: str):
+	expanded_path = await anyio.Path(path).expanduser()
+	await expanded_path.mkdir(parents=True, exist_ok=True)
+
+
+async def _run_generic_task(request: RunTaskRequest, api_key_headers: LLMAPIKeyHeaders | None = None):
 	if request.downloads_path:
-		Path(request.downloads_path).mkdir(parents=True, exist_ok=True)
+		await anyio.Path(request.downloads_path).mkdir(parents=True, exist_ok=True)
 	resolved_user_data_dir = _resolve_user_data_dir(
 		user_data_dir=request.user_data_dir,
 		session_id=request.session_id,
 		namespace='local-api',
 	)
 	if resolved_user_data_dir:
-		Path(resolved_user_data_dir).expanduser().mkdir(parents=True, exist_ok=True)
+		await _mkdir_expanded(resolved_user_data_dir)
 	browser_profile = BrowserProfile(
 		keep_alive=request.keep_alive,
 		use_cloud=request.use_cloud,
@@ -303,7 +352,7 @@ async def _run_generic_task(request: RunTaskRequest):
 		allowed_domains=request.allowed_domains,
 		prohibited_domains=request.prohibited_domains,
 	)
-	llm = _build_llm(request)
+	llm = _build_llm(request, api_key_headers=api_key_headers)
 	agent = Agent(task=request.task, llm=llm, browser_profile=browser_profile, use_vision=request.use_vision)
 	history = await agent.run(max_steps=request.max_agent_steps)
 	downloaded_files = agent.browser_session.downloaded_files if agent.browser_session else []
@@ -346,8 +395,15 @@ async def health() -> dict[str, str]:
 
 # Cloud-like task API
 @app.post('/api/v1/run-task')
-async def run_task(request: RunTaskRequest) -> TaskCreatedResponse:
-	job = await store.create(job_type='task', request=request.model_dump(), runner=lambda: _run_generic_task(request))
+async def run_task(
+	request: RunTaskRequest,
+	api_key_headers: Annotated[LLMAPIKeyHeaders, Depends(_read_api_key_headers)],
+) -> TaskCreatedResponse:
+	job = await store.create(
+		job_type='task',
+		request=request.model_dump(),
+		runner=lambda: _run_generic_task(request, api_key_headers=api_key_headers),
+	)
 	return TaskCreatedResponse(id=job.job_id, status=_to_cloud_status(job.status))
 
 
@@ -404,7 +460,10 @@ async def wait_task(task_id: str, timeout_seconds: float = 300.0, poll_interval:
 
 # Optional specialized Kumo endpoint
 @app.post('/api/v1/run-kumo-task')
-async def run_kumo_task(request: RunKumoTaskRequest) -> TaskCreatedResponse:
+async def run_kumo_task(
+	request: RunKumoTaskRequest,
+	api_key_headers: Annotated[LLMAPIKeyHeaders, Depends(_read_api_key_headers)],
+) -> TaskCreatedResponse:
 	resolved_user_data_dir = _resolve_user_data_dir(
 		user_data_dir=request.user_data_dir,
 		session_id=request.session_id,
@@ -424,6 +483,7 @@ async def run_kumo_task(request: RunKumoTaskRequest) -> TaskCreatedResponse:
 			executable_path=request.executable_path,
 			keep_alive=request.keep_alive,
 			max_steps=request.max_agent_steps,
+			api_key=api_key_headers.for_provider('openai'),
 		),
 	)
 	return TaskCreatedResponse(id=job.job_id, status=_to_cloud_status(job.status))
@@ -431,13 +491,23 @@ async def run_kumo_task(request: RunKumoTaskRequest) -> TaskCreatedResponse:
 
 # Legacy endpoints kept for backward compatibility
 @app.post('/v1/jobs/agent')
-async def create_agent_job_legacy(request: RunTaskRequest) -> LegacyJobAccepted:
-	job = await store.create(job_type='agent', request=request.model_dump(), runner=lambda: _run_generic_task(request))
+async def create_agent_job_legacy(
+	request: RunTaskRequest,
+	api_key_headers: Annotated[LLMAPIKeyHeaders, Depends(_read_api_key_headers)],
+) -> LegacyJobAccepted:
+	job = await store.create(
+		job_type='agent',
+		request=request.model_dump(),
+		runner=lambda: _run_generic_task(request, api_key_headers=api_key_headers),
+	)
 	return LegacyJobAccepted(job_id=job.job_id, status=job.status)
 
 
 @app.post('/v1/jobs/kumo')
-async def create_kumo_job_legacy(request: RunKumoTaskRequest) -> LegacyJobAccepted:
+async def create_kumo_job_legacy(
+	request: RunKumoTaskRequest,
+	api_key_headers: Annotated[LLMAPIKeyHeaders, Depends(_read_api_key_headers)],
+) -> LegacyJobAccepted:
 	resolved_user_data_dir = _resolve_user_data_dir(
 		user_data_dir=request.user_data_dir,
 		session_id=request.session_id,
@@ -457,6 +527,7 @@ async def create_kumo_job_legacy(request: RunKumoTaskRequest) -> LegacyJobAccept
 			executable_path=request.executable_path,
 			keep_alive=request.keep_alive,
 			max_steps=request.max_agent_steps,
+			api_key=api_key_headers.for_provider('openai'),
 		),
 	)
 	return LegacyJobAccepted(job_id=job.job_id, status=job.status)
